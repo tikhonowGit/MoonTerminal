@@ -19,12 +19,12 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Build release exe
-        run: cargo build --release -p moon-ui-gpui --bin moonterminal --target x86_64-pc-windows-msvc
+      - name: Build debug exe
+        run: cargo build -p moon-ui-gpui --bin moonterminal --target x86_64-pc-windows-msvc
 
       - name: Upload moonterminal.exe
         uses: actions/upload-artifact@v4
         with:
-          name: moonterminal-windows-custom
-          path: target/x86_64-pc-windows-msvc/release/moonterminal.exe
+          name: moonterminal-windows-custom-debug
+          path: target/x86_64-pc-windows-msvc/debug/moonterminal.exe
           if-no-files-found: error
