@@ -5,7 +5,7 @@ use crate::feed::{
     ApiKeyExpiry, ChartTextRows, ConnFault, ConnFaultKind, CoreConfig, CoreConfigArea,
     CoreConfigEditEvent, CoreConfigEditPhase, CoreConfigEditResult, CoreConfigEditRow,
     CoreConfigRejection, CoreEndpoint, CoreIdentityFacts, CoreStartupStatus, CoreSysStatus,
-    FeedMsg, FieldMask, OrderRow, OrderTrace, OrderTracePoint,
+    FeedMsg, FieldMask, OrderRow, OrderTrace, OrderTracePoint, StrategyRow,
 };
 
 /// A core with the given freshness inputs; everything else stays at its default.
@@ -355,6 +355,22 @@ fn order_row(uid: u64, create_time_ms: f64) -> OrderRow {
     }
 }
 
+fn strategy_row(id: u64, name: &str, kind_ordinal: u8, fields: &[(&str, &str)]) -> StrategyRow {
+    StrategyRow {
+        id,
+        name: name.into(),
+        kind: String::new(),
+        kind_ordinal,
+        folder_path: String::new(),
+        checked: true,
+        is_short: false,
+        fields: fields
+            .iter()
+            .map(|(name, value)| ((*name).into(), (*value).into()))
+            .collect(),
+    }
+}
+
 /// An order row carrying a LOOSE trace sample: `create_time_ms - anchor_ms` is the skew these
 /// tests want the estimator to adopt. Since HIGH 4, `create_time_ms - now_ms` alone can no longer
 /// feed the estimator (see `session::clock_skew`), so every store-level test that needs an actual
@@ -400,6 +416,38 @@ fn a_skewed_batch_lands_within_a_second_of_true_utc() {
         .expect("order must be retained")
         .create_ms;
     assert!((retained - now).abs() < 1_000.0);
+}
+
+#[test]
+fn manual_hook_restore_remembers_linked_hook_without_active_manual_mode() {
+    let mut cd = CoreData::new();
+    cd.apply(FeedMsg::Strategies(vec![
+        strategy_row(20, "HOOK", 20, &[]),
+        strategy_row(77, "Hook_M1", 12, &[("UseHookStrategy", "HOOK")]),
+    ]));
+
+    let mut hook = order_row(42, 1_000.0);
+    hook.buy_price = 98.0;
+    hook.price = 100.0;
+    hook.size = 1.25;
+    hook.remaining_size = 1.25;
+    hook.strat_id = 20;
+    hook.strat_name = "HOOK".into();
+    cd.apply(FeedMsg::Orders(vec![hook.clone()]));
+
+    assert!(
+        cd.order_lines.manual_hook_placements("BTCUSDT").is_empty(),
+        "live hooks are remembered internally but not offered"
+    );
+
+    hook.job_is_done = true;
+    cd.apply(FeedMsg::Orders(vec![hook]));
+
+    let remembered = cd.order_lines.manual_hook_placements("BTCUSDT");
+    assert_eq!(remembered.len(), 1);
+    assert_eq!(remembered[0].strategy_id, 77);
+    assert_eq!(remembered[0].strategy_name, "Hook_M1");
+    assert!((remembered[0].depth_pct - 2.0).abs() < 1e-9);
 }
 
 /// An honest UTC core must never adopt a correction, so its batch passes through untouched and

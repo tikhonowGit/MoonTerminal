@@ -855,6 +855,90 @@ chart.order_menu.split:
   ru: "Split order (%{n})"
   en: "Split order (%{n})"
   es: "Split order (%{n})"
+chart.manual_hooks.restore_button:
+  ru: "Руко-хуки (%{n})"
+  en: "Manual hooks (%{n})"
+  es: "Hooks manuales (%{n})"
+chart.manual_hooks.restore_badge:
+  ru: "%{n}"
+  en: "%{n}"
+  es: "%{n}"
+chart.manual_hooks.restore_tooltip:
+  ru: "Восстановить снятые руко-хуки (%{n})"
+  en: "Restore removed manual hooks (%{n})"
+  es: "Restaurar hooks manuales quitados (%{n})"
+chart.manual_hooks.title:
+  ru: "Восстановить снятые руко-хуки?"
+  en: "Restore removed manual hooks?"
+  es: "¿Restaurar hooks manuales quitados?"
+chart.manual_hooks.hint:
+  ru: "Эти незаполненные руко-хуки исчезли с доступных ядер. Отметьте, что выставить заново."
+  en: "These unfilled manual hooks disappeared from available cores. Select which ones to place again."
+  es: "Estos hooks manuales sin ejecutar desaparecieron de los núcleos disponibles. Seleccione cuáles colocar de nuevo."
+chart.manual_hooks.restore_selected:
+  ru: "Восстановить выбранные (%{n})"
+  en: "Restore selected (%{n})"
+  es: "Restaurar seleccionadas (%{n})"
+chart.manual_hooks.clear_unselected:
+  ru: "Удалить невыбранные (%{n})"
+  en: "Remove unselected (%{n})"
+  es: "Eliminar no seleccionadas (%{n})"
+chart.manual_hooks.none_selected:
+  ru: "Ничего не выбрано"
+  en: "Nothing selected"
+  es: "Nada seleccionado"
+chart.manual_hooks.select_all:
+  ru: "Все"
+  en: "All"
+  es: "Todo"
+chart.manual_hooks.core_filter:
+  ru: "Ядра"
+  en: "Cores"
+  es: "Núcleos"
+chart.manual_hooks.all_cores:
+  ru: "Все ядра"
+  en: "All cores"
+  es: "Todos los núcleos"
+chart.manual_hooks.cores_n:
+  ru: "Ядер: %{n}"
+  en: "Cores: %{n}"
+  es: "Núcleos: %{n}"
+chart.manual_hooks.strategy_filter:
+  ru: "Ручная страта"
+  en: "Manual strategy"
+  es: "Estrategia manual"
+chart.manual_hooks.all_strategies:
+  ru: "Все руко-хуки"
+  en: "All manual hooks"
+  es: "Todos los hooks manuales"
+chart.manual_hooks.no_rows_for_filter:
+  ru: "Нет снятых руко-хуков для выбранных ядер"
+  en: "No removed manual hooks for the selected cores"
+  es: "No hay hooks manuales quitados para los núcleos seleccionados"
+chart.manual_hooks.no_rows:
+  ru: "Нет снятых руко-хуков для восстановления"
+  en: "No removed manual hooks to restore"
+  es: "No hay hooks manuales quitados para restaurar"
+chart.manual_hooks.selected_summary:
+  ru: "выбрано %{selected} из %{total}"
+  en: "%{selected} of %{total} selected"
+  es: "%{selected} de %{total} seleccionado"
+chart.manual_hooks.strategy_missing:
+  ru: "стратегия не найдена"
+  en: "strategy missing"
+  es: "estrategia no encontrada"
+chart.manual_hooks.long:
+  ru: "Long"
+  en: "Long"
+  es: "Long"
+chart.manual_hooks.short:
+  ru: "Short"
+  en: "Short"
+  es: "Short"
+chart.manual_hooks.row:
+  ru: "%{exchange} · %{core} · %{market} · %{side} @ %{price} · size %{size}"
+  en: "%{exchange} · %{core} · %{market} · %{side} @ %{price} · size %{size}"
+  es: "%{exchange} · %{core} · %{market} · %{side} @ %{price} · tamaño %{size}"
 coin_menu.open:
   ru: "Открыть на графике"
   en: "Open on chart"

@@ -48,6 +48,26 @@ fn order(uid: u64) -> OrderRow {
     }
 }
 
+fn selected_manual_strategy() -> ManualStrategySelection {
+    ManualStrategySelection {
+        id: 77,
+        name: "Hook_M1".into(),
+        linked_strategy_id: 20,
+        linked_strategy_name: "HOOK".into(),
+    }
+}
+
+fn manual_hook(uid: u64) -> OrderRow {
+    let mut r = order(uid);
+    r.buy_price = 98.0;
+    r.price = 100.0;
+    r.size = 1.25;
+    r.remaining_size = 1.25;
+    r.strat_id = 20;
+    r.strat_name = "HOOK".into();
+    r
+}
+
 /// First step time of one retained line, which is where the chart starts drawing it.
 fn line_start(store: &OrderLineStore, uid: u64, kind: LineKind) -> f64 {
     store
@@ -102,6 +122,154 @@ fn terminal_status_closes_order_immediately() {
     assert!(state.closed_store_ms.is_some());
     assert!(state.closed_rev.is_some());
     assert!(!state.active);
+}
+
+#[test]
+fn live_manual_hook_is_hidden_until_it_disappears_and_keeps_depth() {
+    let mut store = OrderLineStore::default();
+    let manual = selected_manual_strategy();
+    assert!(store.update_with_manual(&[manual_hook(42)], 0, Some(&manual)));
+    assert!(
+        store.manual_hook_placements("BTCUSDT").is_empty(),
+        "a live hook is remembered internally but must not be offered for restore"
+    );
+
+    store
+        .orders
+        .get_mut(&42)
+        .expect("retained order must exist")
+        .last_seen_ms -= CLOSE_GRACE_MS + 1.0;
+    assert!(store.update_with_manual(&[], 0, None));
+
+    let remembered = store.manual_hook_placements("BTCUSDT");
+    assert_eq!(remembered.len(), 1);
+    assert_eq!(remembered[0].strategy_id, 77);
+    assert_eq!(remembered[0].strategy_name, "Hook_M1");
+    assert!((remembered[0].price - 98.0).abs() < 1e-9);
+    assert!((remembered[0].reference_price - 100.0).abs() < 1e-9);
+    assert!((remembered[0].depth_pct - 2.0).abs() < 1e-9);
+    assert!((remembered[0].quote_size - 122.5).abs() < 1e-9);
+}
+
+#[test]
+fn terminal_manual_hook_refreshes_depth_while_alive() {
+    let mut store = OrderLineStore::default();
+    let manual = selected_manual_strategy();
+    assert!(store.update_with_manual(&[manual_hook(42)], 0, Some(&manual)));
+
+    let mut moved = manual_hook(42);
+    moved.buy_price = 194.0;
+    moved.price = 200.0;
+    assert!(store.update_with_manual(&[moved], 0, Some(&manual)));
+
+    store
+        .orders
+        .get_mut(&42)
+        .expect("retained order must exist")
+        .last_seen_ms -= CLOSE_GRACE_MS + 1.0;
+    assert!(store.update_with_manual(&[], 0, None));
+
+    let remembered = store.manual_hook_placements("BTCUSDT");
+    assert_eq!(remembered.len(), 1);
+    assert!((remembered[0].price - 194.0).abs() < 1e-9);
+    assert!((remembered[0].reference_price - 200.0).abs() < 1e-9);
+    assert!((remembered[0].depth_pct - 3.0).abs() < 1e-9);
+}
+
+#[test]
+fn filled_manual_hook_is_hidden_until_it_is_cancelled() {
+    let mut store = OrderLineStore::default();
+    let manual = selected_manual_strategy();
+    assert!(store.update_with_manual(&[manual_hook(42)], 0, Some(&manual)));
+
+    let mut filled = manual_hook(42);
+    filled.filled = true;
+    filled.fill_pct = 100.0;
+    filled.sell_price = 101.0;
+    assert!(store.update_with_manual(&[filled], 0, Some(&manual)));
+    assert!(
+        store.manual_hook_placements("BTCUSDT").is_empty(),
+        "a hook that turned into a position is not offered until the hook order closes"
+    );
+
+    store
+        .orders
+        .get_mut(&42)
+        .expect("retained order must exist")
+        .last_seen_ms -= CLOSE_GRACE_MS + 1.0;
+    assert!(store.update_with_manual(&[], 0, None));
+
+    let remembered = store.manual_hook_placements("BTCUSDT");
+    assert_eq!(remembered.len(), 1);
+    assert_eq!(remembered[0].strategy_id, 77);
+    assert!((remembered[0].size - 1.25).abs() < 1e-9);
+    assert!((remembered[0].quote_size - 122.5).abs() < 1e-9);
+}
+
+#[test]
+fn partially_filled_cancelled_manual_hook_restores_full_original_size() {
+    let mut store = OrderLineStore::default();
+    let manual = selected_manual_strategy();
+    assert!(store.update_with_manual(&[manual_hook(42)], 0, Some(&manual)));
+
+    let mut partial = manual_hook(42);
+    partial.filled = true;
+    partial.fill_pct = 40.0;
+    partial.job_is_done = true;
+    assert!(store.update_with_manual(&[partial], 0, Some(&manual)));
+
+    let remembered = store.manual_hook_placements("BTCUSDT");
+    assert_eq!(remembered.len(), 1);
+    assert_eq!(remembered[0].strategy_id, 77);
+    assert!((remembered[0].size - 1.25).abs() < 1e-9);
+    assert!((remembered[0].quote_size - 122.5).abs() < 1e-9);
+    assert!((remembered[0].depth_pct - 2.0).abs() < 1e-9);
+}
+
+#[test]
+fn linked_manual_hook_is_remembered_without_active_manual_selection() {
+    let mut store = OrderLineStore::default();
+    let manual = selected_manual_strategy();
+    assert!(store.update_with_manual_strategies(
+        &[manual_hook(42)],
+        0,
+        std::slice::from_ref(&manual),
+    ));
+
+    store
+        .orders
+        .get_mut(&42)
+        .expect("retained order must exist")
+        .last_seen_ms -= CLOSE_GRACE_MS + 1.0;
+    assert!(store.update_with_manual_strategies(&[], 0, &[]));
+
+    let remembered = store.manual_hook_placements("BTCUSDT");
+    assert_eq!(remembered.len(), 1);
+    assert_eq!(remembered[0].strategy_id, 77);
+    assert!((remembered[0].depth_pct - 2.0).abs() < 1e-9);
+}
+
+#[test]
+fn invalid_market_price_does_not_overwrite_manual_hook_depth() {
+    let mut store = OrderLineStore::default();
+    let manual = selected_manual_strategy();
+    assert!(store.update_with_manual(&[manual_hook(42)], 0, Some(&manual)));
+
+    let mut without_price = manual_hook(42);
+    without_price.price = 0.0;
+    assert!(!store.update_with_manual(&[without_price], 0, Some(&manual)));
+
+    store
+        .orders
+        .get_mut(&42)
+        .expect("retained order must exist")
+        .last_seen_ms -= CLOSE_GRACE_MS + 1.0;
+    assert!(store.update_with_manual(&[], 0, None));
+
+    let remembered = store.manual_hook_placements("BTCUSDT");
+    assert_eq!(remembered.len(), 1);
+    assert!((remembered[0].reference_price - 100.0).abs() < 1e-9);
+    assert!((remembered[0].depth_pct - 2.0).abs() < 1e-9);
 }
 
 /// `order_lines.rs:update` omitting batch removal from `open_uids` would leave a terminal order in

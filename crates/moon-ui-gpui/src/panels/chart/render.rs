@@ -5,8 +5,8 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use moon_ui::{
-    MoonBadge, MoonBadgeVariant, MoonButton, MoonButtonVariant, MoonPalette, MoonRect, MoonSize,
-    rgba_from,
+    MoonBadge, MoonBadgeVariant, MoonButton, MoonButtonVariant, MoonNotification, MoonPalette,
+    MoonRect, MoonScrollableElement as _, MoonSize, MoonWindowExt as _, rgba_from,
 };
 use rust_i18n::t;
 
@@ -14,6 +14,10 @@ use moon_chart::paint::now_unix_ms;
 
 use super::render_input;
 use super::{ChartPanel, chart_bootstrap_present_rate_hz};
+use crate::backend::{
+    SyncManualIssueSummary, SyncManualParamRepairPlan, SyncManualRepairPlan,
+    SyncManualStrategyStatus,
+};
 
 /// Fixed clearance for the chart's top-left control strip, so the status row never competes with
 /// its corner controls for the same pixels.
@@ -34,6 +38,330 @@ const RETRY_BUTTON_PX: f32 = 72.0;
 /// button — so the row only appears where it has somewhere to go.
 const HISTORY_STATUS_MIN_SLOT_W: u32 =
     ((OVERLAY_LEFT_PX + OVERLAY_RIGHT_MARGIN_PX + RETRY_BUTTON_PX) * 2.0) as u32;
+
+const SYNC_MANUAL_REPAIR_DIALOG_ID: &str = "chart-sync-manual-repair-dialog";
+
+impl ChartPanel {
+    fn request_sync_manual_orders_or_repair(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let repair_plan = self.sync_manual_orders_on.then(|| {
+            self.sync_manual_order_targets
+                .first()
+                .and_then(|(origin, _)| {
+                    self.backend
+                        .read(cx)
+                        .sync_manual_repair_plan(*origin, &self.sync_manual_order_targets)
+                })
+        });
+        if let Some(Some(plan)) = repair_plan {
+            open_sync_manual_repair_dialog(self.backend.clone(), plan, window, cx);
+            return;
+        }
+        self.request_sync_manual_orders(cx);
+    }
+
+    fn open_sync_manual_diagnostics(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(origin) = self
+            .sync_manual_order_targets
+            .first()
+            .map(|(origin, _)| *origin)
+        else {
+            return;
+        };
+        let (missing_plan, param_plan) = {
+            let backend = self.backend.read(cx);
+            (
+                backend.sync_manual_repair_plan(origin, &self.sync_manual_order_targets),
+                backend.sync_manual_param_repair_plan(origin, &self.sync_manual_order_targets),
+            )
+        };
+        if missing_plan.is_none() && param_plan.is_none() {
+            window.push_notification(
+                MoonNotification::info("SYNC: исправляемых отличий не найдено".to_string()),
+                cx,
+            );
+            return;
+        }
+        open_sync_manual_diagnostics_dialog(
+            self.backend.clone(),
+            missing_plan,
+            param_plan,
+            window,
+            cx,
+        );
+    }
+}
+
+fn open_sync_manual_repair_dialog(
+    backend: Entity<crate::Backend>,
+    plan: SyncManualRepairPlan,
+    window: &mut Window,
+    cx: &mut Context<ChartPanel>,
+) {
+    let summary = plan.summary();
+    window.open_unique_moon_dialog(
+        SYNC_MANUAL_REPAIR_DIALOG_ID,
+        cx,
+        move |dialog, _window, cx| {
+            let p = MoonPalette::active(cx);
+            let backend = backend.clone();
+            let plan = plan.clone();
+            let body = summary.clone();
+            dialog
+                .w(px(540.0))
+                .close_button(true)
+                .overlay(true)
+                .overlay_closable(true)
+                .bg(rgb(p.shell_high))
+                .border_color(rgb(p.border))
+                .rounded(crate::design::r_container(cx))
+                .text_color(rgb(p.text))
+                .header(
+                    div()
+                        .w_full()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(rgb(p.border))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("SYNC: копирование стратегий"),
+                )
+                .on_cancel(|_, _, _| true)
+                .content(move |content, _window, cx| {
+                    let p = MoonPalette::active(cx);
+                    content.child(
+                        div()
+                            .w_full()
+                            .max_h(crate::design::ui_px(cx, 320.0))
+                            .overflow_y_scrollbar()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .children(body.lines().map(|line| {
+                                div()
+                                    .font_family(crate::design::mono())
+                                    .text_size(crate::design::t_body(cx))
+                                    .text_color(rgb(p.text))
+                                    .child(line.to_string())
+                            })),
+                    )
+                })
+                .footer(
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_end()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            MoonButton::new("chart-sync-repair-cancel")
+                                .outline()
+                                .label("Отмена")
+                                .on_click(move |_, window, cx| window.close_dialog(cx))
+                                .render(),
+                        )
+                        .child(
+                            MoonButton::new("chart-sync-repair-copy")
+                                .variant(MoonButtonVariant::Blue)
+                                .label("Скопировать")
+                                .on_click(move |_, window, cx| {
+                                    let result = backend.update(cx, |backend, _| {
+                                        backend.apply_sync_manual_repair_plan(&plan)
+                                    });
+                                    match result {
+                                        Ok(()) => {
+                                            window.push_notification(
+                                                MoonNotification::success(
+                                                    "SYNC: запрос на копирование стратегий отправлен".to_string(),
+                                                ),
+                                                cx,
+                                            );
+                                            window.close_dialog(cx);
+                                        }
+                                        Err(error) => {
+                                            window.push_notification(
+                                                MoonNotification::error(format!(
+                                                    "SYNC: не удалось скопировать стратегии: {error:#}"
+                                                )),
+                                                cx,
+                                            );
+                                        }
+                                    }
+                                })
+                                .render(),
+                        ),
+                )
+        },
+    );
+}
+
+fn open_sync_manual_diagnostics_dialog(
+    backend: Entity<crate::Backend>,
+    missing_plan: Option<SyncManualRepairPlan>,
+    param_plan: Option<SyncManualParamRepairPlan>,
+    window: &mut Window,
+    cx: &mut Context<ChartPanel>,
+) {
+    let mut lines = Vec::new();
+    if let Some(plan) = &missing_plan {
+        lines.push("Недостающие стратегии".to_string());
+        lines.extend(plan.summary().lines().map(str::to_string));
+    }
+    if let Some(plan) = &param_plan {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push("Отличающиеся параметры".to_string());
+        lines.extend(plan.summary().lines().map(str::to_string));
+    }
+    window.open_unique_moon_dialog(
+        SYNC_MANUAL_REPAIR_DIALOG_ID,
+        cx,
+        move |dialog, _window, cx| {
+            let p = MoonPalette::active(cx);
+            let body = lines.clone();
+            let missing_button = missing_plan.clone().map({
+                let backend = backend.clone();
+                move |plan| {
+                    MoonButton::new("chart-sync-diagnostics-copy-missing")
+                        .variant(MoonButtonVariant::Blue)
+                        .label("Скопировать недостающие")
+                        .on_click({
+                            let backend = backend.clone();
+                            move |_, window, cx| {
+                                let result = backend.update(cx, |backend, _| {
+                                    backend.apply_sync_manual_repair_plan(&plan)
+                                });
+                                match result {
+                                    Ok(()) => {
+                                        window.push_notification(
+                                            MoonNotification::success(
+                                                "SYNC: запрос на копирование стратегий отправлен"
+                                                    .to_string(),
+                                            ),
+                                            cx,
+                                        );
+                                        window.close_dialog(cx);
+                                    }
+                                    Err(error) => window.push_notification(
+                                        MoonNotification::error(format!(
+                                            "SYNC: не удалось скопировать стратегии: {error:#}"
+                                        )),
+                                        cx,
+                                    ),
+                                }
+                            }
+                        })
+                        .render()
+                }
+            });
+            let params_button = param_plan.clone().map({
+                let backend = backend.clone();
+                move |plan| {
+                    MoonButton::new("chart-sync-diagnostics-align-params")
+                        .variant(MoonButtonVariant::Blue)
+                        .label("Взять большинство")
+                        .on_click({
+                            let backend = backend.clone();
+                            move |_, window, cx| {
+                                let result = backend.update(cx, |backend, _| {
+                                    backend.apply_sync_manual_param_repair_plan(&plan)
+                                });
+                                match result {
+                                    Ok(()) => {
+                                        window.push_notification(
+                                            MoonNotification::success(
+                                                "SYNC: запрос на правку параметров отправлен"
+                                                    .to_string(),
+                                            ),
+                                            cx,
+                                        );
+                                        window.close_dialog(cx);
+                                    }
+                                    Err(error) => window.push_notification(
+                                        MoonNotification::error(format!(
+                                            "SYNC: не удалось исправить параметры: {error:#}"
+                                        )),
+                                        cx,
+                                    ),
+                                }
+                            }
+                        })
+                        .render()
+                }
+            });
+            dialog
+                .w(px(640.0))
+                .close_button(true)
+                .overlay(true)
+                .overlay_closable(true)
+                .bg(rgb(p.shell_high))
+                .border_color(rgb(p.border))
+                .rounded(crate::design::r_container(cx))
+                .text_color(rgb(p.text))
+                .header(
+                    div()
+                        .w_full()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(rgb(p.border))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Диагностика SYNC"),
+                )
+                .on_cancel(|_, _, _| true)
+                .content(move |content, _window, cx| {
+                    let p = MoonPalette::active(cx);
+                    content.child(
+                        div()
+                            .w_full()
+                            .max_h(crate::design::ui_px(cx, 360.0))
+                            .overflow_y_scrollbar()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .children(body.iter().map(|line| {
+                                div()
+                                    .font_family(crate::design::mono())
+                                    .text_size(crate::design::t_body(cx))
+                                    .text_color(rgb(if line.is_empty() {
+                                        p.text_muted
+                                    } else {
+                                        p.text
+                                    }))
+                                    .child(line.clone())
+                            })),
+                    )
+                })
+                .footer(
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_end()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            MoonButton::new("chart-sync-diagnostics-cancel")
+                                .outline()
+                                .label("Отмена")
+                                .on_click(move |_, window, cx| window.close_dialog(cx))
+                                .render(),
+                        )
+                        .children(missing_button)
+                        .children(params_button),
+                )
+        },
+    );
+}
+
+fn sync_issue_variant(summary: &SyncManualIssueSummary) -> MoonButtonVariant {
+    if summary.missing > 0 {
+        MoonButtonVariant::Danger
+    } else {
+        MoonButtonVariant::Soft
+    }
+}
 
 impl Render for ChartPanel {
     /// Render the live chart surface and its explicitly unscoped in-chart figure settings.
@@ -80,6 +408,8 @@ impl Render for ChartPanel {
             chart_labels,
             arb_view,
             report_axis,
+            sync_manual_status,
+            sync_manual_issues,
         ) = {
             let b = self.backend.read(cx);
             let eff = b.preview.as_ref().unwrap_or(&b.config);
@@ -117,6 +447,26 @@ impl Render for ChartPanel {
             // the observer already restamped before this render ran, instead of rebuilding it here
             // every frame.
             let report_axis = self.settings_sig.report_axis.clone();
+            let sync_manual_status = if self.sync_manual_orders_on {
+                self.sync_manual_order_targets
+                    .first()
+                    .and_then(|(origin, _)| {
+                        self.chart
+                            .active_target()
+                            .and_then(|(target, _)| b.sync_manual_strategy_status(*origin, target))
+                    })
+            } else {
+                None
+            };
+            let sync_manual_issues = if self.sync_manual_orders_on {
+                self.sync_manual_order_targets
+                    .first()
+                    .and_then(|(origin, _)| {
+                        b.sync_manual_issue_summary(*origin, &self.sync_manual_order_targets)
+                    })
+            } else {
+                None
+            };
             (
                 theme,
                 orders,
@@ -127,6 +477,8 @@ impl Render for ChartPanel {
                 chart_labels,
                 arb_view,
                 report_axis,
+                sync_manual_status,
+                sync_manual_issues,
             )
         };
         // The cursor's mode badge is published by `sync_fig_visual` off the backend observer, which
@@ -244,6 +596,15 @@ impl Render for ChartPanel {
         // Show the broom only on the anchor beside its selected lock; it toggles book-only mode for
         // the anchor's neighbors.
         let broom_btns: Vec<(usize, f32, f32)> = if self.compare_eligible && compare_anchor {
+            axis_panes
+                .iter()
+                .map(|(idx, rect, _)| (*idx, rect.x / sf + axis_off, rect.y / sf))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let sync_manual_on = self.sync_manual_orders_on;
+        let sync_btns: Vec<(usize, f32, f32)> = if self.compare_eligible && compare_anchor {
             axis_panes
                 .iter()
                 .map(|(idx, rect, _)| (*idx, rect.x / sf + axis_off, rect.y / sf))
@@ -397,6 +758,27 @@ impl Render for ChartPanel {
             // in `frame()`; see data_state::apply_slot_geometry. The first present therefore uses
             // the real slot, without expanding to a default size or lagging during reflow.
             .child(self.chart.canvas().text_under().absolute().size_full())
+            .children(sync_manual_status.and_then(|status| {
+                let (color, fill_alpha) = match status {
+                    SyncManualStrategyStatus::Ready => return None,
+                    SyncManualStrategyStatus::MissingStrategy { .. } => (palette.red, 0.13),
+                    SyncManualStrategyStatus::DifferentParams { .. } => (palette.amber, 0.0),
+                };
+                let tooltip = status.tooltip();
+                let frame = div()
+                    .id("chart-sync-manual-status-frame")
+                    .absolute()
+                    .inset_0()
+                    .border_2()
+                    .border_color(rgba_from(color, if fill_alpha > 0.0 { 0.98 } else { 0.82 }))
+                    .when(fill_alpha > 0.0, |this| {
+                        this.bg(rgba_from(color, fill_alpha))
+                    });
+                Some(match tooltip {
+                    Some(text) => frame.tooltip(crate::panels::common::text_tooltip(text)),
+                    None => frame,
+                })
+            }))
             // Transparent zones over the arbitrage venue NAMES, for one reason: a native cursor can
             // only be asked for during PAINT, so a hover handler cannot set it — a styled element
             // over the name can. They carry no click handler; the press is still routed by the
@@ -614,6 +996,43 @@ impl Render for ChartPanel {
                         entity.update(app, |this, cx| this.request_compare_broom(cx));
                     })
                     .render()
+            }))
+            .children(sync_btns.iter().copied().map(|(idx, left, top)| {
+                let entity = cx.entity();
+                MoonButton::new(SharedString::from(format!("chart-sync-manual-{idx}")))
+                    .label("SYNC")
+                    .size(MoonSize::Xs)
+                    .variant(if sync_manual_on {
+                        MoonButtonVariant::Blue
+                    } else {
+                        MoonButtonVariant::Ghost
+                    })
+                    .selected(sync_manual_on)
+                    .bounds(MoonRect::new(left + 57.0, top + 3.0, 38.0, 15.0))
+                    .on_click(move |_, window, app| {
+                        entity.update(app, |this, cx| {
+                            this.request_sync_manual_orders_or_repair(window, cx)
+                        });
+                    })
+                    .render()
+            }))
+            .children(sync_btns.into_iter().filter_map(|(idx, left, top)| {
+                let issues = sync_manual_issues.clone()?;
+                let entity = cx.entity();
+                Some(
+                    MoonButton::new(SharedString::from(format!("chart-sync-issues-{idx}")))
+                        .label(format!("{}", issues.count()))
+                        .size(MoonSize::Xs)
+                        .variant(sync_issue_variant(&issues))
+                        .bounds(MoonRect::new(left + 98.0, top + 3.0, 20.0, 15.0))
+                        .tooltip(issues.tooltip())
+                        .on_click(move |_, window, app| {
+                            entity.update(app, |this, cx| {
+                                this.open_sync_manual_diagnostics(window, cx)
+                            });
+                        })
+                        .render(),
+                )
             }))
             // LAST of the overlays: the settings panel is opened deliberately and edits what is
             // under it, so a close/pin/broom button painting over its top rows — and taking the

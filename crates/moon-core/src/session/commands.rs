@@ -14,6 +14,7 @@ use crate::feed::{
     WalletKind,
 };
 use crate::market::{MarketDataMode, MarketDataSource};
+use crate::session::order_lines::ManualHookPlacement;
 use crate::venue::{AccountMergeKey, CoreVenue};
 
 use super::{CoreId, CoreSession, CoreStore, SessionManager};
@@ -1200,6 +1201,35 @@ impl SessionManager {
     /// strategies. Only the manager mutates the store.
     pub fn store(&self) -> &CoreStore {
         &self.store
+    }
+
+    /// Return remembered manual-hook placements for one core market.
+    pub fn manual_hook_placements(&self, core: CoreId, market: &str) -> Vec<ManualHookPlacement> {
+        self.store
+            .core(core)
+            .map(|data| data.order_lines.manual_hook_placements(market))
+            .unwrap_or_default()
+    }
+
+    /// Return every remembered manual-hook placement for one core.
+    pub fn all_manual_hook_placements(&self, core: CoreId) -> Vec<ManualHookPlacement> {
+        self.store
+            .core(core)
+            .map(|data| data.order_lines.all_manual_hook_placements())
+            .unwrap_or_default()
+    }
+
+    /// Drop remembered manual-hook placements after they were restored or dismissed.
+    pub fn forget_manual_hook_placements(
+        &mut self,
+        core: CoreId,
+        market: &str,
+        placements: &[ManualHookPlacement],
+    ) {
+        if let Some(data) = self.store.core_mut(core) {
+            data.order_lines
+                .forget_manual_hook_placements(market, placements);
+        }
     }
 
     /// Live core sessions in `AppConfig::servers` order, independent of connection timing.

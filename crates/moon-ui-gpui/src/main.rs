@@ -195,6 +195,8 @@ struct Backend {
     /// The detect's market anchors the tab alongside that market from other group cores,
     /// deduplicated by exchange, with lock and clear controls. See `open_compare_tab`.
     open_compare_request: Option<backend::OpenCompareRequest>,
+    /// Runtime chart SYNC scope used by synchronized manual orders and Manual-strategy mirroring.
+    sync_manual_strategy_targets: Vec<(CoreId, String)>,
     /// Revision of `open_compare_request`, waking `ChartTabs` through its signature like the
     /// atomic Main-open request revision.
     open_compare_request_rev: u64,

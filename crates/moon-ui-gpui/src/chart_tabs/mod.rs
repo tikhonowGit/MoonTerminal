@@ -26,6 +26,7 @@ mod ingest;
 mod labels_popup;
 mod layout_popup;
 mod main_stack;
+mod manual_restore;
 mod popup_slot;
 mod settings;
 mod sig;
@@ -35,7 +36,7 @@ mod strip;
 mod tests;
 mod windows;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub(crate) use add_stack::AddChartStack;
 use common::LayoutPopupHost;
@@ -289,7 +290,15 @@ pub struct ChartTabs {
     /// Next custom-tab number.
     next_custom_num: u32,
     /// Markets checked in the search dropdown for Open in New Tab.
-    coin_selected: std::collections::HashSet<(CoreId, String)>,
+    coin_selected: HashSet<(CoreId, String)>,
+    /// Explicit restore dialog for manual-hook orders remembered after core restarts.
+    manual_hook_restore_open: bool,
+    /// Rows selected in the global manual-hook restore dialog.
+    manual_hook_restore_selected: HashSet<manual_restore::ManualHookRestoreKey>,
+    /// Core filter in the global manual-hook restore dialog; empty means all cores.
+    manual_hook_restore_cores: HashSet<CoreId>,
+    /// Manual-strategy name filter in the global manual-hook restore dialog.
+    manual_hook_restore_strategy: Option<String>,
     /// Coin rows of the search dropdown whose core list the user has flipped open or shut.
     ///
     /// Holds what was TOGGLED away from the default, not what is open, so a freshly opened list
@@ -738,7 +747,11 @@ impl ChartTabs {
             custom: Vec::new(),
             custom_labels: HashMap::new(),
             next_custom_num: CUSTOM_NUM_BASE,
-            coin_selected: std::collections::HashSet::new(),
+            coin_selected: HashSet::new(),
+            manual_hook_restore_open: false,
+            manual_hook_restore_selected: HashSet::new(),
+            manual_hook_restore_cores: HashSet::new(),
+            manual_hook_restore_strategy: None,
             coin_expanded: std::collections::HashSet::new(),
             custom_gate_gen: HashMap::new(),
             detached: Vec::new(),

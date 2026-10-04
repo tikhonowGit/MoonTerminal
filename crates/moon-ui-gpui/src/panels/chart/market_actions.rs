@@ -161,6 +161,8 @@ impl ChartPanel {
                 };
                 let backend = self.backend.clone();
                 let group = self.workspace_group.clone();
+                let sync_manual_on = self.sync_manual_orders_on;
+                let sync_targets = self.sync_manual_order_targets.clone();
                 let (action, active, core, market, coin) = (
                     button.action,
                     button.active,
@@ -225,6 +227,8 @@ impl ChartPanel {
                                         core,
                                         market,
                                         coin,
+                                        sync_manual_on,
+                                        sync_targets.clone(),
                                         app,
                                     );
                                 })
@@ -264,6 +268,8 @@ fn dispatch_market_action(
     core: CoreId,
     market: String,
     coin: String,
+    sync_manual_on: bool,
+    sync_targets: Vec<(CoreId, String)>,
     app: &mut App,
 ) {
     backend.update(app, |b, cx| {
@@ -272,12 +278,32 @@ fn dispatch_market_action(
         }
         match action {
             ChartAction::CancelBuy => {
-                if let Err(error) = b.session.cancel_market_buys(core, market) {
-                    log::warn!("cancel market buys failed: {error:#}");
+                let targets = if sync_manual_on {
+                    b.sync_market_action_targets(core, &market, &sync_targets)
+                } else {
+                    vec![(core, market)]
+                };
+                for (target_core, target_market) in targets {
+                    if !b.workspace_action_allows_core(group, target_core) {
+                        continue;
+                    }
+                    if let Err(error) = b.session.cancel_market_buys(target_core, target_market) {
+                        log::warn!("cancel market buys failed: {error:#}");
+                    }
                 }
             }
             ChartAction::PanicSell => {
-                b.toggle_panic_sell(core, market);
+                let targets = if sync_manual_on {
+                    b.sync_market_action_targets(core, &market, &sync_targets)
+                } else {
+                    vec![(core, market)]
+                };
+                for (target_core, target_market) in targets {
+                    if !b.workspace_action_allows_core(group, target_core) {
+                        continue;
+                    }
+                    b.toggle_panic_sell(target_core, target_market);
+                }
             }
             // The COIN, not the market: the core matches its favourites against
             // `market_currency`. See `Backend::toggle_fav_market`.
@@ -351,6 +377,8 @@ fn open_ban_menu(
                     // A ban is keyed by the MARKET, so the coin this dispatch also carries is not
                     // read on this path; see `coin_menu::temp_ban_symbol`.
                     String::new(),
+                    false,
+                    Vec::new(),
                     app,
                 );
             })

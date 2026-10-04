@@ -491,6 +491,8 @@ impl ChartPanel {
         };
 
         let workspace_group = self.workspace_group.clone();
+        let sync_manual_on = self.sync_manual_orders_on;
+        let sync_targets = self.sync_manual_order_targets.clone();
         let placed = self.backend.update(cx, |b, _| {
             // Warn, not debug, and for the reason the identical guard on `move_orders_to_price`
             // states: a window that may not trade this core looks exactly like a gesture that
@@ -503,99 +505,82 @@ impl ChartPanel {
                 );
                 return false;
             }
-            let Some(terms) = b.manual_order_terms(core, &market, price, short, None) else {
-                // The reason itself is stated by whichever guard refused, on the line immediately
-                // above this one. Listing every possible cause here as well only competes with it.
-                log::warn!(
-                    "manual chart order blocked: core={} market={market} — see the refusal above",
-                    moon_core::feed::core_label(core)
-                );
-                return false;
-            };
-            let Some(usd) = terms.size_usd else {
-                log::debug!(
-                    "manual order refused: core={} market={market} has no visible USD-equivalent \
-                     order size",
-                    moon_core::feed::core_label(core)
-                );
-                return false;
-            };
-            let sent = if pending {
-                // NOTHING derived from an entry price rides with a pending, because it has no entry
-                // yet: the core prices it at the trigger moved by its own pending spread
-                // (`pending_orders_spread` ships at 0.5%, more than a whole take profit on many
-                // manual orders). That rules out `planned_sell`, an absolute price on the wire, and
-                // it rules out queueing the visible stop, which is written onto the published order
-                // as an absolute level computed from the entry. The core applies the exits it holds
-                // when the order really opens: the generation this one waits behind, or its
-                // strategy.
-                //
-                // KNOWN GAP, and the slot's hint states it rather than leaving the trader to find
-                // it: `queue_visible_stop` is what carries an EDITED panel SL onto a manual-strategy
-                // order, so with a manual strategy selected a pending takes that strategy's stop and
-                // the edit does not reach it. Queueing it here would not fix that — the queue holds
-                // one stop per market for 15 seconds and matches the next order to appear, while a
-                // pending may wait hours and then open at a price this side never saw. The real fix
-                // is a per-order stop intent that survives until its own uid leaves the pending
-                // state and is computed from the entry the core actually used; that is a feature,
-                // and `docs-internal/HOTKEYS_UNIFIED_PLAN.md` carries it.
-                b.session.place_pending_order(
-                    core,
-                    market.clone(),
-                    short,
-                    price,
-                    terms.size_base,
-                    terms.strategy_id,
-                    terms.exit,
-                    terms.sync_exit,
-                )
+            let targets = if sync_manual_on {
+                b.sync_manual_order_targets(core, &market, &sync_targets)
             } else {
-                b.queue_visible_stop(core, &market, price, short, terms.exit);
-                b.session.place_order(
-                    core,
-                    market.clone(),
-                    short,
-                    price,
-                    terms.size_base,
-                    terms.strategy_id,
-                    terms.exit,
-                    terms.planned_sell.unwrap_or(0.0),
-                    terms.sync_exit,
-                )
+                vec![(core, market.clone())]
             };
-            match sent {
-                Ok(()) => {
-                    // The pointer position is in the SUCCESS line too, so a log holding both
-                    // outcomes shows where the accepting zone actually starts — a refusal alone
-                    // gives one side of the boundary and leaves the other to guesswork.
-                    log::info!(
-                        "manual chart order: core={} market={market} side={} {}={price:.8} size={} usd={usd} at ({:.1}, {:.1})",
-                        moon_core::feed::core_label(core),
-                        if short { "short" } else { "long" },
-                        if pending { "trigger" } else { "price" },
-                        terms.size_base,
-                        pos.0,
-                        pos.1
-                    );
-                    true
+            let mut any_placed = false;
+            for (target_core, target_market) in targets {
+                if !b.workspace_action_allows_core(workspace_group.as_deref(), target_core) {
+                    continue;
                 }
-                Err(err) => {
-                    // The stop was queued before the order was sent, and it attaches to whatever
-                    // order appears next in this market. With no order on its way, leaving it armed
-                    // would put THIS click's stop on somebody else's next order. Only the immediate
-                    // path queued one: the queue holds a single stop per market, so cancelling on a
-                    // failed PENDING would discard the stop an immediate order placed moments ago
-                    // and is still waiting for.
-                    if !pending {
-                        b.cancel_pending_stop(core, &market);
-                    }
+                let Some(terms) =
+                    b.manual_order_terms(target_core, &target_market, price, short, None)
+                else {
                     log::warn!(
-                        "manual chart order failed: core={} market={market} price={price:.8}: {err:#}",
-                        moon_core::feed::core_label(core)
+                        "manual chart order blocked: core={} market={target_market} — see the refusal above",
+                        moon_core::feed::core_label(target_core)
                     );
-                    false
+                    continue;
+                };
+                let Some(usd) = terms.size_usd else {
+                    log::debug!(
+                        "manual order refused: core={} market={target_market} has no visible USD-equivalent order size",
+                        moon_core::feed::core_label(target_core)
+                    );
+                    continue;
+                };
+                let sent = if pending {
+                    b.session.place_pending_order(
+                        target_core,
+                        target_market.clone(),
+                        short,
+                        price,
+                        terms.size_base,
+                        terms.strategy_id,
+                        terms.exit,
+                        terms.sync_exit,
+                    )
+                } else {
+                    b.queue_visible_stop(target_core, &target_market, price, short, terms.exit);
+                    b.session.place_order(
+                        target_core,
+                        target_market.clone(),
+                        short,
+                        price,
+                        terms.size_base,
+                        terms.strategy_id,
+                        terms.exit,
+                        terms.planned_sell.unwrap_or(0.0),
+                        terms.sync_exit,
+                    )
+                };
+                match sent {
+                    Ok(()) => {
+                        log::info!(
+                            "manual chart order: core={} market={target_market} side={} {}={price:.8} size={} usd={usd} at ({:.1}, {:.1})",
+                            moon_core::feed::core_label(target_core),
+                            if short { "short" } else { "long" },
+                            if pending { "trigger" } else { "price" },
+                            terms.size_base,
+                            pos.0,
+                            pos.1
+                        );
+                        any_placed = true;
+                    }
+                    Err(err) => {
+                        if !pending {
+                            b.cancel_pending_stop(target_core, &target_market);
+                        }
+                        log::warn!(
+                            "manual chart order failed: core={} market={target_market} price={price:.8}: {err:#}",
+                            moon_core::feed::core_label(target_core)
+                        );
+                    }
                 }
             }
+            any_placed
         });
         // Per-window/tab auto-pin keeps a chart that accepted an order from expiring through TTL
         // or inactivity.

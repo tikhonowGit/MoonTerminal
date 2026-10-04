@@ -208,6 +208,7 @@ pub(super) fn boot(cfg: AppConfig, input: BootInput, cx: &mut App) {
         open_main_request: crate::backend::OpenMainRequest::default(),
         auto_workspace_surface_requests: crate::workspace::AutoWorkspaceSurfaceRequests::default(),
         open_compare_request: None,
+        sync_manual_strategy_targets: Vec::new(),
         open_compare_request_rev: 0,
         diag_open_first_market: std::env::var_os("MOON_RENDER_DIAG_OPEN_FIRST_MARKET").is_some(),
         diag_open_done: false,

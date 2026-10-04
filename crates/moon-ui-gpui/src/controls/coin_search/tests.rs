@@ -12,6 +12,33 @@ use moon_core::market::MarketLabel;
 use moon_core::venue::CoreVenue;
 use std::collections::HashSet;
 
+/// Regression target: the checkbox on a grouped coin row must select or clear every core offering
+/// that instrument, not only the one `pick_core` would open on a plain row click.
+#[test]
+fn grouped_coin_checkbox_targets_every_member() {
+    let source = include_str!("../coin_search.rs");
+    let row = source
+        .split("let group_targets: Vec<(CoreId, String, bool)> = group")
+        .nth(1)
+        .and_then(|tail| tail.split("MoonDisclosure::button").next())
+        .expect("grouped coin rows must build a bulk checkbox target list before the caret");
+
+    assert!(
+        row.contains(".members") && row.contains("selected.contains(&key)"),
+        "the group checkbox must derive its state from every member, not from the picked core"
+    );
+    assert!(
+        row.contains("for (core, market, was_checked) in &group_targets")
+            && row.contains("if *was_checked != *want")
+            && row.contains("on_toggle_row(*core, market.clone(), app);"),
+        "the group checkbox must set/clear only members that need to change"
+    );
+    assert!(
+        !row.contains("on_toggle_row(pick_core_id"),
+        "the group checkbox must not fall back to toggling only the row's picked core"
+    );
+}
+
 /// Build one coin hit with a stable full instrument label for grouped-search assertions.
 fn coin_hit(core: u64, venue: u8, coin: &str) -> CoinHit {
     CoinHit {

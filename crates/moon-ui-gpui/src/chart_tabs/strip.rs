@@ -436,6 +436,73 @@ impl Render for ChartTabs {
                 .h(px(0.0))
                 .child(panel)
         });
+        let manual_hook_restore_count = self.manual_hook_restore_count(cx);
+        let manual_hook_restore_btn = {
+            let open = self.manual_hook_restore_is_open();
+            let view = cx.entity();
+            let button = MoonButton::new("chart-tabs-manual-hook-restore")
+                .leading_icon(MoonButtonIconSlot::new("icons/undo-2.svg").color(p_strip.blue))
+                .tooltip(
+                    t!(
+                        "chart.manual_hooks.restore_tooltip",
+                        n = manual_hook_restore_count
+                    )
+                    .to_string(),
+                )
+                .size(MoonSize::Xs)
+                .variant(if open {
+                    MoonButtonVariant::Blue
+                } else {
+                    MoonButtonVariant::Soft
+                })
+                .selected(open)
+                .on_click(move |_, _window, app| {
+                    view.update(app, |this, cx| {
+                        this.open_manual_hook_restore_panel(cx);
+                    });
+                })
+                .render();
+            div()
+                .relative()
+                .child(button)
+                .when(manual_hook_restore_count > 0, |this| {
+                    let label = if manual_hook_restore_count > 9 {
+                        "9+".to_string()
+                    } else {
+                        manual_hook_restore_count.to_string()
+                    };
+                    this.child(
+                        div()
+                            .absolute()
+                            .top(px(-4.0))
+                            .right(px(-4.0))
+                            .min_w(px(12.0))
+                            .h(px(12.0))
+                            .px(px(3.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(rgb(design::danger_color(p_strip)))
+                            .text_color(rgb(p_strip.shell))
+                            .text_xs()
+                            .child(label),
+                    )
+                })
+        };
+        let manual_hook_restore_panel = self.render_manual_hook_restore(p_strip, cx);
+        let manual_hook_restore_dismiss = self.manual_hook_restore_is_open().then(|| {
+            div()
+                .id("tabs-manual-hook-restore-dismiss")
+                .absolute()
+                .inset_0()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _w, cx| {
+                        this.close_manual_hook_restore_panel(cx);
+                    }),
+                )
+        });
         // The tool-settings panel closes the same way the market list does: a layer below the
         // cluster catches every click that missed it. Without one the panel stays parked over the
         // chart until its own button is pressed again.
@@ -505,6 +572,7 @@ impl Render for ChartTabs {
             )
             .child(design::chrome_divider(cx, p_strip))
             .child(design::chrome_section(cx).child(coin_search_el))
+            .child(manual_hook_restore_btn)
             .child(design::chrome_divider(cx, p_strip))
             .children(all_cores_group)
             .child(
@@ -584,9 +652,11 @@ impl Render for ChartTabs {
                     .relative()
                     .child(self.active_element())
                     .children(coin_dismiss)
-                    .children(fig_dismiss),
+                    .children(fig_dismiss)
+                    .children(manual_hook_restore_dismiss),
             )
             .children(coin_popup)
             .children(fig_style_panel)
+            .children(manual_hook_restore_panel)
     }
 }

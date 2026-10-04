@@ -49,11 +49,45 @@ pub struct OrderLineState {
     pub active: bool,
 }
 
+/// Last known placement of an unfilled manual-hook order that disappeared from a core.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ManualHookPlacement {
+    pub market: String,
+    pub is_short: bool,
+    pub restore_ready: bool,
+    pub price: f64,
+    pub reference_price: f64,
+    pub depth_pct: f64,
+    pub size: f64,
+    pub quote_size: f64,
+    pub strategy_id: u64,
+    pub strategy_name: String,
+    pub captured_ms: f64,
+    pub source_uid: u64,
+}
+
+/// Active manual-strategy selection from a core's client settings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManualStrategySelection {
+    pub id: u64,
+    pub name: String,
+    pub linked_strategy_id: u64,
+    pub linked_strategy_name: String,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ManualHookMarketPrice {
+    pub price: f64,
+}
+
 /// Per-core capacity of the closed-order ring, equal to the `max_closed_orders` slider maximum.
 ///
 /// New entries are pushed to the back and the oldest fall from the front, without sorting or a
 /// pruning scan. Open orders are not capped and remain while active.
 const CLOSED_RING_CAP: usize = 5000;
+
+/// Per-core capacity of remembered manual-hook placements.
+const MANUAL_HOOK_RING_CAP: usize = 200;
 
 /// Grace period in milliseconds before an order missing from a snapshot is marked closed.
 ///
@@ -65,6 +99,29 @@ const CLOSE_GRACE_MS: f64 = 2500.0;
 /// Relative price-change threshold that prevents float jitter from creating false knots.
 fn price_eps(p: f32) -> f32 {
     p.abs() * 1e-5 + 1e-9
+}
+
+fn looks_like_manual_hook_name(name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    name.starts_with("hook_") || name.starts_with("hook ")
+}
+
+fn looks_like_linked_hook_order_name(name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    name == "hook" || looks_like_manual_hook_name(&name)
+}
+
+fn order_matches_manual_strategy(
+    order: &RetainedOrder,
+    strategy: &ManualStrategySelection,
+) -> bool {
+    order.strat_id == strategy.id
+        || (!strategy.name.is_empty() && order.strat_name.eq_ignore_ascii_case(&strategy.name))
+        || (strategy.linked_strategy_id != 0 && order.strat_id == strategy.linked_strategy_id)
+        || (!strategy.linked_strategy_name.is_empty()
+            && order
+                .strat_name
+                .eq_ignore_ascii_case(&strategy.linked_strategy_name))
 }
 
 /// Constrains a wire-supplied line start to the order's own lifetime, or reports it as absent.
@@ -237,6 +294,14 @@ pub struct RetainedOrder {
     pub strat_id: u64,
     /// Strategy name for legacy rows without a numeric identity.
     pub strat_name: String,
+    /// Manual strategy selected when this unfilled hook was first observed.
+    pub manual_strategy_id: u64,
+    /// Manual strategy name, used as a fallback if ids change after reconnect.
+    pub manual_strategy_name: String,
+    /// Hook strategy selected through the Manual strategy settings, if known.
+    pub manual_linked_strategy_id: u64,
+    /// Linked Hook strategy name, used as a fallback if ids change after reconnect.
+    pub manual_linked_strategy_name: String,
     pub is_short: bool,
     /// Whether the order is EMULATED rather than live, mirrored from the wire row.
     ///
@@ -259,6 +324,8 @@ pub struct RetainedOrder {
     /// unassigned; labels use `[N]` to associate that order's lines.
     pub chart_num: u32,
     pub pending: bool,
+    /// Whether the entry leg has filled and the retained order now represents a position.
+    pub filled: bool,
     pub panic_sell: bool,
     pub is_moon_shot: bool,
     pub corridor_price_down: f32,
@@ -371,6 +438,10 @@ impl RetainedOrder {
             market: r.market.clone(),
             strat_id: r.strat_id,
             strat_name: r.strat_name.clone(),
+            manual_strategy_id: 0,
+            manual_strategy_name: String::new(),
+            manual_linked_strategy_id: 0,
+            manual_linked_strategy_name: String::new(),
             is_short: r.is_short,
             emulator: r.emulator,
             size: r.size as f32,
@@ -378,6 +449,7 @@ impl RetainedOrder {
             fill_pct: r.fill_pct,
             chart_num: 0,
             pending: r.pending,
+            filled: r.filled,
             panic_sell: r.panic_sell,
             is_moon_shot: r.is_moon_shot,
             corridor_price_down: r.corridor_price_down,
@@ -418,6 +490,8 @@ pub struct OrderLineStore {
     /// rebuilt only when orders change, together with `rev`, rather than on every prepare pass. Its
     /// ordered map supports borrowed market lookup without SipHash and clones a key once per market.
     auto_fit_ranges: BTreeMap<String, (f32, f32)>,
+    /// Session-local placements of manual hooks that were cancelled or disappeared from a core.
+    manual_hook_memory: VecDeque<ManualHookPlacement>,
     /// Increments on any render-affecting change, including geometry, label inputs, and zones.
     pub rev: u64,
     seq_counter: u64,
@@ -439,6 +513,31 @@ impl OrderLineStore {
     ///         `entry_fill_ms` RE-DERIVED from its row in this batch, if it has one — see
     ///         `RetainedOrder::correction_gen`.
     pub fn update(&mut self, rows: &[OrderRow], skew_generation: u64) -> bool {
+        self.update_with_manual(rows, skew_generation, None)
+    }
+
+    pub fn update_with_manual(
+        &mut self,
+        rows: &[OrderRow],
+        skew_generation: u64,
+        manual_strategy: Option<&ManualStrategySelection>,
+    ) -> bool {
+        match manual_strategy {
+            Some(strategy) => self.update_with_manual_strategies(
+                rows,
+                skew_generation,
+                std::slice::from_ref(strategy),
+            ),
+            None => self.update_with_manual_strategies(rows, skew_generation, &[]),
+        }
+    }
+
+    pub fn update_with_manual_strategies(
+        &mut self,
+        rows: &[OrderRow],
+        skew_generation: u64,
+        manual_strategies: &[ManualStrategySelection],
+    ) -> bool {
         let now_ms = now_unix_ms();
         self.update_generation = self.update_generation.wrapping_add(1);
         let generation = self.update_generation;
@@ -447,6 +546,7 @@ impl OrderLineStore {
         // loop because the loop holds a mutable borrow of `self.orders` through its entry.
         let mut close_now: Vec<u64> = Vec::new();
         let mut closed_this_update: Vec<u64> = Vec::new();
+        let mut manual_hooks_to_remember: Vec<ManualHookPlacement> = Vec::new();
 
         // Assign fresh rows in UID order. Each receives the smallest number not held by a currently
         // open retained order or an earlier fresh row in this batch. A fresh terminal row can reserve
@@ -536,6 +636,28 @@ impl OrderLineStore {
             }
             order.is_short = r.is_short;
             order.pending = r.pending;
+            if r.strat_id != 0 {
+                order.strat_id = r.strat_id;
+            }
+            if !r.strat_name.is_empty() {
+                order.strat_name.clone_from(&r.strat_name);
+            }
+            order.filled = r.filled;
+            if order.manual_strategy_id == 0 && order.closed_ms.is_none() && !order.filled {
+                if let Some(strategy) = manual_strategies.iter().find(|strategy| {
+                    if strategy.id == 0 {
+                        return false;
+                    }
+                    let selected_manual_hook_order = looks_like_manual_hook_name(&strategy.name)
+                        && looks_like_linked_hook_order_name(&order.strat_name);
+                    selected_manual_hook_order || order_matches_manual_strategy(order, strategy)
+                }) {
+                    order.manual_strategy_id = strategy.id;
+                    order.manual_strategy_name = strategy.name.clone();
+                    order.manual_linked_strategy_id = strategy.linked_strategy_id;
+                    order.manual_linked_strategy_name = strategy.linked_strategy_name.clone();
+                }
+            }
             // Stored like the two scalars above and, like them, NOT render-affecting. It used to be:
             // the flag decided whether the order was drawn at all, so a flip had to force a rebuild.
             // That filter is gone — the setting selects closed trades now — and nothing on the chart
@@ -568,6 +690,7 @@ impl OrderLineStore {
                 changed = true;
             }
             let f = r.filled;
+            order.filled = f;
             // The entry for both long and short orders is represented by the Buy line, visible from
             // order creation. The opposite-side Sell exit appears only after the entry fills and
             // starts when the exit leg was created. Stops, take profit, VStop, and liquidation also
@@ -667,10 +790,22 @@ impl OrderLineStore {
             for (v, start_ms, i) in vals {
                 changed |= order.lines[i].update(v, start_ms, now_ms, stale_correction);
             }
+            let row_market_price =
+                (r.price.is_finite() && r.price > 0.0).then_some(ManualHookMarketPrice {
+                    price: r.price as f64,
+                });
+            if let Some(placement) = manual_hook_placement(order, now_ms, row_market_price, false) {
+                manual_hooks_to_remember.push(placement);
+            }
             // The explicit core flag `job_is_done` means the order is terminal, either filled or
             // cancelled, and awaits deferred removal. Mark it closed immediately while it remains
             // in the snapshot instead of waiting for disappearance plus the grace period.
             if r.job_is_done && order.closed_ms.is_none() {
+                if let Some(placement) =
+                    manual_hook_placement(order, now_ms, row_market_price, true)
+                {
+                    manual_hooks_to_remember.push(placement);
+                }
                 order.closed_ms = Some(now_ms);
                 order.closed_reason = Some(explicit_close_reason(r));
                 order.closed_store_ms = Some(now_ms);
@@ -699,6 +834,9 @@ impl OrderLineStore {
                 continue;
             };
             if ord.seen_generation != generation && now_ms - ord.last_seen_ms > CLOSE_GRACE_MS {
+                if let Some(placement) = manual_hook_placement(ord, now_ms, None, true) {
+                    manual_hooks_to_remember.push(placement);
+                }
                 ord.closed_ms = Some(ord.last_seen_ms);
                 ord.closed_reason = Some(OrderCloseReason::BackstopMissing);
                 ord.closed_store_ms = Some(now_ms);
@@ -711,6 +849,9 @@ impl OrderLineStore {
         for uid in newly_closed {
             self.remember_closed(uid);
             changed = true;
+        }
+        for placement in manual_hooks_to_remember {
+            self.remember_manual_hook(placement);
         }
         if !closed_this_update.is_empty() {
             closed_this_update.sort_unstable();
@@ -790,6 +931,109 @@ impl OrderLineStore {
                 self.orders.remove(&old_uid);
             }
         }
+    }
+
+    /// Records one manual-hook placement and enforces the session-memory cap.
+    fn remember_manual_hook(&mut self, placement: ManualHookPlacement) {
+        let mut placement = placement;
+        let placement_has_reference =
+            !same_restore_price(placement.reference_price, placement.price)
+                || placement.depth_pct.abs() > 1e-9;
+        if placement.restore_ready && !placement_has_reference && placement.source_uid != 0 {
+            if let Some(old) = self.manual_hook_memory.iter().find(|old| {
+                old.source_uid == placement.source_uid
+                    && (!same_restore_price(old.reference_price, old.price)
+                        || old.depth_pct.abs() > 1e-9)
+            }) {
+                placement.reference_price = old.reference_price;
+                placement.depth_pct = old.depth_pct;
+            }
+        }
+        let placement_has_reference =
+            !same_restore_price(placement.reference_price, placement.price)
+                || placement.depth_pct.abs() > 1e-9;
+        if !placement_has_reference
+            && placement.source_uid != 0
+            && self.manual_hook_memory.iter().any(|old| {
+                old.source_uid == placement.source_uid
+                    && (!same_restore_price(old.reference_price, old.price)
+                        || old.depth_pct.abs() > 1e-9)
+            })
+        {
+            return;
+        }
+        self.manual_hook_memory.retain(|old| {
+            if placement.source_uid != 0 && old.source_uid == placement.source_uid {
+                return false;
+            }
+            old.market != placement.market
+                || old.is_short != placement.is_short
+                || old.strategy_id != placement.strategy_id
+                || old.source_uid != placement.source_uid
+                || !same_restore_size(old.quote_size, placement.quote_size)
+                || !same_restore_price(old.price, placement.price)
+        });
+        self.manual_hook_memory.push_back(placement);
+        while self.manual_hook_memory.len() > MANUAL_HOOK_RING_CAP {
+            self.manual_hook_memory.pop_front();
+        }
+    }
+
+    /// Returns remembered manual-hook placements for one market, newest first.
+    pub fn manual_hook_placements(&self, market: &str) -> Vec<ManualHookPlacement> {
+        self.manual_hook_memory
+            .iter()
+            .rev()
+            .filter(|placement| placement.restore_ready)
+            .filter(|placement| placement.market == market)
+            .filter(|placement| !self.has_active_manual_hook_like(placement))
+            .cloned()
+            .collect()
+    }
+
+    /// Returns every remembered manual-hook placement for this core, newest first.
+    pub fn all_manual_hook_placements(&self) -> Vec<ManualHookPlacement> {
+        self.manual_hook_memory
+            .iter()
+            .rev()
+            .filter(|placement| placement.restore_ready)
+            .filter(|placement| !self.has_active_manual_hook_like(placement))
+            .cloned()
+            .collect()
+    }
+
+    fn has_active_manual_hook_like(&self, placement: &ManualHookPlacement) -> bool {
+        self.open_uids.iter().any(|uid| {
+            self.orders.get(uid).is_some_and(|order| {
+                order.closed_ms.is_none()
+                    && !order.filled
+                    && order.market == placement.market
+                    && order.is_short == placement.is_short
+                    && same_restore_size(order.size as f64, placement.size)
+                    && order.lines[LineKind::Buy as usize]
+                        .current_price()
+                        .is_some_and(|price| same_restore_price(price as f64, placement.price))
+            })
+        })
+    }
+
+    /// Removes remembered manual-hook placements that were just restored or dismissed.
+    pub fn forget_manual_hook_placements(
+        &mut self,
+        market: &str,
+        placements: &[ManualHookPlacement],
+    ) {
+        self.manual_hook_memory.retain(|old| {
+            old.market != market
+                || !placements.iter().any(|sent| {
+                    old.is_short == sent.is_short
+                        && old.strategy_id == sent.strategy_id
+                        && old.source_uid == sent.source_uid
+                        && same_restore_size(old.quote_size, sent.quote_size)
+                        && same_restore_size(old.size, sent.size)
+                        && same_restore_price(old.price, sent.price)
+                })
+        });
     }
 
     /// Iterates orders for one market, as used to render a specific chart panel's lines.
@@ -887,6 +1131,101 @@ impl OrderLineStore {
     pub fn knows(&self, uid: u64) -> bool {
         self.orders.contains_key(&uid)
     }
+}
+
+fn manual_hook_placement(
+    order: &RetainedOrder,
+    captured_ms: f64,
+    market_price: Option<ManualHookMarketPrice>,
+    restore_ready: bool,
+) -> Option<ManualHookPlacement> {
+    if order.closed_ms.is_some() || order.is_moon_shot {
+        return None;
+    }
+    if order.filled && !restore_ready {
+        return None;
+    }
+    if order.manual_strategy_id == 0 {
+        return None;
+    }
+    let linked_to_hook = order.manual_linked_strategy_id != 0
+        || looks_like_linked_hook_order_name(&order.manual_linked_strategy_name);
+    let legacy_hook_name = looks_like_manual_hook_name(&order.manual_strategy_name);
+    if !linked_to_hook && !legacy_hook_name {
+        return None;
+    }
+    let manual_name_matches = !order.manual_strategy_name.is_empty()
+        && order
+            .strat_name
+            .eq_ignore_ascii_case(order.manual_strategy_name.as_str());
+    let linked_name_matches = !order.manual_linked_strategy_name.is_empty()
+        && order
+            .strat_name
+            .eq_ignore_ascii_case(order.manual_linked_strategy_name.as_str());
+    let linked_id_matches =
+        order.manual_linked_strategy_id != 0 && order.strat_id == order.manual_linked_strategy_id;
+    let hook_like_order_matches =
+        order.strat_name.is_empty() || looks_like_linked_hook_order_name(&order.strat_name);
+    if order.strat_id != order.manual_strategy_id
+        && !manual_name_matches
+        && !linked_id_matches
+        && !linked_name_matches
+        && !hook_like_order_matches
+    {
+        return None;
+    }
+    let price = order.lines[LineKind::Buy as usize].current_price()? as f64;
+    let size = order.size as f64;
+    if !(price.is_finite() && price > 0.0 && size.is_finite() && size > 0.0) {
+        return None;
+    }
+    let quote_size = price * size;
+    if !(quote_size.is_finite() && quote_size > 0.0) {
+        return None;
+    }
+    let reference_price = market_price
+        .map(|price| price.price)
+        .filter(|price| price.is_finite() && *price > 0.0)
+        .unwrap_or(price);
+    let depth_pct = if order.is_short {
+        ((price / reference_price) - 1.0) * 100.0
+    } else {
+        (1.0 - (price / reference_price)) * 100.0
+    };
+    let depth_pct = if depth_pct.is_finite() {
+        depth_pct.max(0.0)
+    } else {
+        0.0
+    };
+    let strategy_name = if order.manual_strategy_name.is_empty() {
+        order.strat_name.clone()
+    } else {
+        order.manual_strategy_name.clone()
+    };
+    Some(ManualHookPlacement {
+        market: order.market.clone(),
+        is_short: order.is_short,
+        restore_ready,
+        price,
+        reference_price,
+        depth_pct,
+        size,
+        quote_size,
+        strategy_id: order.manual_strategy_id,
+        strategy_name,
+        captured_ms,
+        source_uid: order.uid,
+    })
+}
+
+fn same_restore_price(a: f64, b: f64) -> bool {
+    let scale = a.abs().max(b.abs()).max(1.0);
+    (a - b).abs() <= scale * 1e-6
+}
+
+fn same_restore_size(a: f64, b: f64) -> bool {
+    let scale = a.abs().max(b.abs()).max(1.0);
+    (a - b).abs() <= scale * 1e-6
 }
 
 fn explicit_close_reason(row: &OrderRow) -> OrderCloseReason {

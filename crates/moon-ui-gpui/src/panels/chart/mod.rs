@@ -309,6 +309,12 @@ pub struct ChartPanel {
     compare_broom_pending: bool,
     /// Tab-level broom state supplied by the stack to highlight the anchor's broom button.
     compare_broom_on: bool,
+    /// Whether synchronized manual orders are enabled for this comparison stack.
+    sync_manual_orders_on: bool,
+    /// Pending SYNC-button request consumed by the owning stack.
+    sync_manual_orders_pending: bool,
+    /// Stack-owned synchronized manual-order targets.
+    sync_manual_order_targets: Vec<(CoreId, String)>,
     /// Ghost-cursor handles for comparison peers. With the lock active, the stack gives each panel
     /// weak handles to the other engines; mouse movement sends them the cursor price without a GPUI
     /// notification because each peer schedules its own present. Empty means comparison is inactive.
@@ -776,6 +782,9 @@ impl ChartPanel {
             orderbook_only: false,
             compare_broom_pending: false,
             compare_broom_on: false,
+            sync_manual_orders_on: false,
+            sync_manual_orders_pending: false,
+            sync_manual_order_targets: Vec::new(),
             ghost_peers: Vec::new(),
             view_dirty: true,
             camera_dirty: false,
@@ -1004,6 +1013,9 @@ impl ChartPanel {
             orderbook_only: false,
             compare_broom_pending: false,
             compare_broom_on: false,
+            sync_manual_orders_on: false,
+            sync_manual_orders_pending: false,
+            sync_manual_order_targets: Vec::new(),
             ghost_peers: Vec::new(),
             view_dirty: true,
             camera_dirty: false,
@@ -1721,6 +1733,31 @@ impl ChartPanel {
     /// Takes and clears the pending broom-button request.
     pub fn take_compare_broom_request(&mut self) -> bool {
         std::mem::take(&mut self.compare_broom_pending)
+    }
+
+    /// Records a synchronized-manual-order toggle request for the owning stack.
+    fn request_sync_manual_orders(&mut self, cx: &mut Context<Self>) {
+        self.sync_manual_orders_pending = true;
+        cx.notify();
+    }
+
+    /// Takes and clears the pending synchronized-manual-order toggle request.
+    pub fn take_sync_manual_orders_request(&mut self) -> bool {
+        std::mem::take(&mut self.sync_manual_orders_pending)
+    }
+
+    /// Applies stack-owned synchronized manual-order state to this panel.
+    pub fn set_sync_manual_orders(
+        &mut self,
+        on: bool,
+        targets: Vec<(CoreId, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sync_manual_orders_on != on || self.sync_manual_order_targets != targets {
+            self.sync_manual_orders_on = on;
+            self.sync_manual_order_targets = targets;
+            cx.notify();
+        }
     }
 
     /// Enables book-only broom mode: rendering hides the plot and price axis and expands the book.

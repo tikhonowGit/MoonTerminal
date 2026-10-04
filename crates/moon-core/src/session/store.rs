@@ -18,7 +18,7 @@ use crate::feed::{
     TempBlacklistRow, TransferAssetsSnapshot,
 };
 use crate::session::clock_skew::CoreClockSkew;
-use crate::session::order_lines::OrderLineStore;
+use crate::session::order_lines::{ManualStrategySelection, OrderLineStore};
 use crate::util::{now_unix_ms, now_unix_ms_i64};
 
 /// Maximum number of recent detects retained in memory for each core.
@@ -31,6 +31,42 @@ const MAX_LOG: usize = 5000;
 /// Maximum number of undelivered Engine action toasts queued while no window is active.
 /// The active window's shell consumes the queue.
 const MAX_ENGINE_ACTIONS: usize = 64;
+const MANUAL_STRATEGY_KIND: u8 = 12;
+const MOON_HOOK_STRATEGY_KIND: u8 = 20;
+
+fn normalized_strategy_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn looks_like_manual_hook_name(name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    name.starts_with("hook_") || name.starts_with("hook ")
+}
+
+fn linked_hook_strategy<'a>(
+    strategies: &'a [StrategyRow],
+    manual: &StrategyRow,
+) -> Option<&'a StrategyRow> {
+    manual.fields.iter().find_map(|(name, value)| {
+        let field_name = normalized_strategy_text(name);
+        if !(field_name.contains("strategy") || field_name.contains("hook")) {
+            return None;
+        }
+        let field_value = normalized_strategy_text(value);
+        if field_value.is_empty() {
+            return None;
+        }
+        strategies.iter().find(|strategy| {
+            strategy.kind_ordinal == MOON_HOOK_STRATEGY_KIND
+                && normalized_strategy_text(&strategy.name) == field_value
+        })
+    })
+}
+
 /// One filed answer about a report row's archived traces; see `CoreData::report_traces`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReportTracesEntry {
@@ -851,10 +887,64 @@ impl CoreData {
             changed = true;
         }
         self.clock_skew.correct(orders.as_mut_slice());
-        changed |= self
-            .order_lines
-            .update(orders.as_slice(), self.clock_skew.generation());
+        let manual_strategies = self.manual_hook_strategy_selections();
+        changed |= self.order_lines.update_with_manual_strategies(
+            orders.as_slice(),
+            self.clock_skew.generation(),
+            manual_strategies.as_slice(),
+        );
         changed
+    }
+
+    fn manual_hook_strategy_selections(&self) -> Vec<ManualStrategySelection> {
+        let mut selections = Vec::new();
+        if let Some(active) = self.active_manual_strategy_selection() {
+            selections.push(active);
+        }
+        for strategy in &self.strategies {
+            if strategy.id == 0
+                || strategy.kind_ordinal != MANUAL_STRATEGY_KIND
+                || selections.iter().any(|known| known.id == strategy.id)
+            {
+                continue;
+            }
+            let linked = linked_hook_strategy(&self.strategies, strategy);
+            if linked.is_none() && !looks_like_manual_hook_name(&strategy.name) {
+                continue;
+            }
+            selections.push(ManualStrategySelection {
+                id: strategy.id,
+                name: strategy.name.clone(),
+                linked_strategy_id: linked.map(|strategy| strategy.id).unwrap_or(0),
+                linked_strategy_name: linked
+                    .map(|strategy| strategy.name.clone())
+                    .unwrap_or_default(),
+            });
+        }
+        selections
+    }
+
+    fn active_manual_strategy_selection(&self) -> Option<ManualStrategySelection> {
+        let settings = self.client_settings.as_ref()?;
+        if !settings.use_manual_strategy || settings.manual_strategy_id == 0 {
+            return None;
+        }
+        let strategy = self
+            .strategies
+            .iter()
+            .find(|strategy| strategy.id == settings.manual_strategy_id);
+        let name = strategy
+            .map(|strategy| strategy.name.clone())
+            .unwrap_or_default();
+        let linked = strategy.and_then(|strategy| linked_hook_strategy(&self.strategies, strategy));
+        Some(ManualStrategySelection {
+            id: settings.manual_strategy_id,
+            name,
+            linked_strategy_id: linked.map(|strategy| strategy.id).unwrap_or(0),
+            linked_strategy_name: linked
+                .map(|strategy| strategy.name.clone())
+                .unwrap_or_default(),
+        })
     }
 
     /// Apply an account-plane message to this core.

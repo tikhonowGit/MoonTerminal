@@ -7,6 +7,8 @@ cd "$ROOT"
 PROFILE="${PROFILE:-release}"
 APP_DIR="${APP_DIR:-$ROOT/target/macos/MoonTerminal.app}"
 SIGN_IDENTITY="${MOON_CODESIGN_IDENTITY:--}"
+SRC_ICON_ICNS="${MOON_APP_ICON_ICNS:-$ROOT/assets/icons/AppIcon.icns}"
+SRC_ICON="${MOON_APP_ICON:-$ROOT/assets/icons/0.png}"
 export TOOLCHAINS="${TOOLCHAINS:-com.apple.dt.toolchain.Metal}"
 
 # Version shown by Finder and About. Taken from the same input as the update baseline the binary
@@ -31,14 +33,16 @@ if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?$ ]];
 fi
 
 build_args=(build -p moon-ui-gpui --bin moonterminal)
-if [[ "$PROFILE" == "release" ]]; then
-  build_args+=(--release)
-fi
-if [[ -n "${FEATURES:-}" ]]; then
-  build_args+=(--features "$FEATURES")
-fi
+if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
+  if [[ "$PROFILE" == "release" ]]; then
+    build_args+=(--release)
+  fi
+  if [[ -n "${FEATURES:-}" ]]; then
+    build_args+=(--features "$FEATURES")
+  fi
 
-cargo "${build_args[@]}"
+  cargo "${build_args[@]}"
+fi
 
 BIN_DIR="$ROOT/target/$PROFILE"
 BIN="$BIN_DIR/moonterminal"
@@ -49,6 +53,23 @@ fi
 
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+
+if [[ -f "$SRC_ICON_ICNS" ]]; then
+  cp "$SRC_ICON_ICNS" "$APP_DIR/Contents/Resources/AppIcon.icns"
+elif [[ -f "$SRC_ICON" ]]; then
+  ICONSET="$APP_DIR/Contents/Resources/AppIcon.iconset"
+  mkdir -p "$ICONSET"
+  for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" "$SRC_ICON" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+    retina=$((size * 2))
+    sips -z "$retina" "$retina" "$SRC_ICON" \
+      --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+  done
+  iconutil -c icns "$ICONSET" -o "$APP_DIR/Contents/Resources/AppIcon.icns"
+  rm -rf "$ICONSET"
+else
+  echo "warning: app icon source not found: $SRC_ICON" >&2
+fi
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -65,6 +86,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <string>MoonTerminal</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleVersion</key>
   <string>${VERSION}</string>
   <key>CFBundleShortVersionString</key>

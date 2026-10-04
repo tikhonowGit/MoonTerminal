@@ -948,12 +948,20 @@ where
             let pick_core_id = picked.core;
             let pick_market = picked.market.clone();
             let pick_server = picked.server.clone();
-            let checked = selected.contains(&(pick_core_id, pick_market.clone()));
+            let group_targets: Vec<(CoreId, String, bool)> = group
+                .members
+                .iter()
+                .map(|hit| {
+                    let key = (hit.core, hit.market.clone());
+                    let checked = selected.contains(&key);
+                    (hit.core, hit.market.clone(), checked)
+                })
+                .collect();
+            let checked = group_targets.iter().all(|(_, _, checked)| *checked);
 
             let on_pick_row = on_pick.clone();
             let market_pick = pick_market.clone();
             let on_toggle_row = on_toggle.clone();
-            let market_toggle = pick_market.clone();
             let on_expand_row = on_expand.clone();
             let caret_key = group.key.clone();
             let pair = group.pair.clone();
@@ -983,8 +991,12 @@ where
                                     )))
                                     .checked(checked)
                                     .on_change(
-                                        move |_v: &bool, _w, app| {
-                                            on_toggle_row(pick_core_id, market_toggle.clone(), app);
+                                        move |want: &bool, _w, app| {
+                                            for (core, market, was_checked) in &group_targets {
+                                                if *was_checked != *want {
+                                                    on_toggle_row(*core, market.clone(), app);
+                                                }
+                                            }
                                             app.stop_propagation();
                                         },
                                     ),

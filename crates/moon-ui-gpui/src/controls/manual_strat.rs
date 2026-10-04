@@ -759,7 +759,7 @@ fn set_manual(b: &mut Backend, core: CoreId, on: bool, id: u64) {
     // The id actually STORED, which is not always the one clicked: an id the snapshot cannot name
     // keeps the previous selection rather than clearing it, and the exits must be seeded from what
     // the order will really use.
-    let id = b.set_manual_strat(core, on, id);
+    let id = b.set_manual_strategy_with_sync(core, on, id);
     // Selecting a strategy SEEDS the visible take profit and stop from it, once — the helper keeps
     // the per-strategy overlay it already has. From then on the screen is authoritative (the order
     // carries what the trader sees, not what the strategy holds), but starting from the strategy's

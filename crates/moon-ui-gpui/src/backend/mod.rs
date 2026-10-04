@@ -13,6 +13,7 @@ mod problem_sound;
 mod quiet;
 pub(crate) mod server_chart;
 pub(crate) mod station;
+mod sync_manual;
 pub(crate) mod telegram;
 #[cfg(test)]
 mod tests;
@@ -28,6 +29,10 @@ pub(crate) use manual_trading::{
 };
 pub(crate) use open_request::{ChartHistoryScope, OpenCompareRequest, OpenMainRequest};
 pub(crate) use problem_sound::ProblemSoundState;
+pub(crate) use sync_manual::{
+    SyncManualIssueSummary, SyncManualParamRepairPlan, SyncManualRepairPlan,
+    SyncManualStrategyStatus,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;

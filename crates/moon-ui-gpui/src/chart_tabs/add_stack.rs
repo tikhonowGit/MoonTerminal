@@ -121,6 +121,10 @@ pub(crate) struct AddChartStack {
     /// Comparison anchor `(core, market)`: the price-leading chart, locked and positioned left.
     /// `None` disables comparison. Active only in horizontal orientation.
     compare_anchor: Option<(CoreId, String)>,
+    /// Whether manual orders and market actions are synchronized across this comparison stack.
+    sync_manual_orders_on: bool,
+    /// Last targets published to Backend for Manual-strategy mirroring.
+    sync_manual_order_targets: Vec<(CoreId, String)>,
     /// Shared comparison Y window `(center, range)`, tracking the comparison anchor's Y window.
     compare_y: Option<(f32, f32)>,
     /// Broom mode: anchor neighbors show only the order book, hiding chart and price axis.
@@ -212,6 +216,8 @@ impl AddChartStack {
             pushed_kind: None,
             detached: false,
             compare_anchor: None,
+            sync_manual_orders_on: false,
+            sync_manual_order_targets: Vec::new(),
             compare_y: None,
             compare_orderbook_only: false,
             hold_vacated: true,
@@ -562,9 +568,56 @@ impl AddChartStack {
             self.layout_orientation,
             cx,
         );
+        self.sync_manual_orders(cx);
         // The lock is what makes this a comparison, so putting it on or taking it off changes which
         // default these charts follow. This is the one path both do go through.
         self.sync_default_kind(cx);
+    }
+
+    fn sync_manual_orders(&mut self, cx: &mut Context<Self>) {
+        let clicked = self.charts.iter().any(|entry| {
+            entry
+                .panel
+                .update(cx, |panel, _| panel.take_sync_manual_orders_request())
+        });
+        let horizontal = self
+            .layout_orientation
+            .unwrap_or(StackOrientation::Vertical)
+            .is_horizontal();
+        let active_compare = horizontal && self.compare_anchor.is_some();
+        if clicked && active_compare {
+            self.sync_manual_orders_on = !self.sync_manual_orders_on;
+        }
+        if !active_compare {
+            self.sync_manual_orders_on = false;
+        }
+        let targets: Vec<(CoreId, String)> = if self.sync_manual_orders_on {
+            self.charts
+                .iter()
+                .filter(|entry| !entry.vacated && entry.panel.read(cx).pane_count() > 0)
+                .map(|entry| (entry.core, entry.market.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for entry in &self.charts {
+            entry.panel.update(cx, |panel, panel_cx| {
+                panel.set_sync_manual_orders(self.sync_manual_orders_on, targets.clone(), panel_cx);
+            });
+        }
+        if targets != self.sync_manual_order_targets {
+            let previous = std::mem::replace(&mut self.sync_manual_order_targets, targets.clone());
+            self.backend.update(cx, |backend, _| {
+                if targets.is_empty() {
+                    backend.clear_sync_manual_strategy_targets_if(&previous);
+                } else {
+                    backend.set_sync_manual_strategy_targets(targets);
+                }
+            });
+        }
+        if clicked {
+            cx.notify();
+        }
     }
 
     /// Show a market on a panel AND point that panel's durable trade history at it.

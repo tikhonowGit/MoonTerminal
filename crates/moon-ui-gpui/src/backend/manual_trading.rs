@@ -1784,6 +1784,21 @@ impl Backend {
             .iter()
             .find(|server| server.id == core)?;
         let usd = self.effective_order_size_usd_for_order(&server.group, core)?;
+        self.manual_order_size_base_from_usd(core, market, price, usd)
+            .map(|size| (size, usd))
+    }
+
+    /// Convert an explicit USD notional into the order-size unit used by `core` on `market`.
+    pub(crate) fn manual_order_size_base_from_usd(
+        &self,
+        core: CoreId,
+        market: &str,
+        price: f64,
+        usd: f64,
+    ) -> Option<f64> {
+        if !(usd.is_finite() && usd > 0.0) {
+            return None;
+        }
         // On a Contracts market `price` is the divisor below, so a caller that cannot name the FILL
         // price gets a size for the price it did name. The pending-order path is the one such
         // caller: its price is a TRIGGER, and the core moves the real entry off it by its own
@@ -1818,7 +1833,7 @@ impl Backend {
             );
             return None;
         }
-        Some((size, usd))
+        Some(size)
     }
 
     /// Return the visible USD equivalent for the crosshair label.
@@ -2066,6 +2081,11 @@ impl Backend {
         }
         self.update_server(core, |server| server.manual_strategy = Some(next.clone()));
         id
+    }
+
+    /// Store and send a manual-strategy selection for one core.
+    pub(crate) fn set_manual_strategy(&mut self, core: CoreId, on: bool, id: u64) -> u64 {
+        self.set_manual_strat(core, on, id)
     }
 
     /// This core's stored manual-strategy mode, or `None` while it has never had one here.
