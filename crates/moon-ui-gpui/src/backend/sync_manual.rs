@@ -122,7 +122,7 @@ impl SyncManualRepairPlan {
 
     pub(crate) fn summary(&self) -> String {
         let mut lines = vec![format!(
-            "Скопировать недостающие SYNC-стратегии для \"{}\"?",
+            "Скопировать недостающие стратегии для SYNC \"{}\"?",
             self.strategy_name
         )];
         for core in &self.cores {
@@ -185,7 +185,7 @@ impl SyncManualParamRepairPlan {
 
     pub(crate) fn summary(&self) -> String {
         let mut lines = vec![format!(
-            "Привести ручную стратегию \"{}\" к значениям большинства?",
+            "Исправить отличия ручной стратегии \"{}\" по большинству ядер?",
             self.strategy_name
         )];
         for core in &self.cores {
@@ -313,32 +313,6 @@ impl Backend {
                 diffs,
             })
         }
-    }
-
-    /// Count red/orange SYNC issues across the current comparison stack.
-    pub(crate) fn sync_manual_issue_summary(
-        &self,
-        origin: CoreId,
-        candidates: &[(CoreId, String)],
-    ) -> Option<SyncManualIssueSummary> {
-        self.active_manual_strategy_row(origin)?;
-        let mut seen = HashSet::new();
-        let mut summary = SyncManualIssueSummary::default();
-        for (target, _) in candidates {
-            if *target == origin || !seen.insert(*target) || !self.core_active(*target) {
-                continue;
-            }
-            match self.sync_manual_strategy_status(origin, *target) {
-                Some(SyncManualStrategyStatus::MissingStrategy { .. }) | None => {
-                    summary.missing += 1;
-                }
-                Some(SyncManualStrategyStatus::DifferentParams { .. }) => {
-                    summary.different += 1;
-                }
-                Some(SyncManualStrategyStatus::Ready) => {}
-            }
-        }
-        Some(summary).filter(|summary| !summary.is_empty())
     }
 
     /// Plan missing strategy copies needed for SYNC to use the anchor's active Manual strategy.
@@ -969,7 +943,7 @@ mod tests {
 
         assert_eq!(
             plan.summary(),
-            "Copy missing SYNC strategies for \"Manual A\"?\nBGF-SUB1: Hook Hook A, Manual Manual A"
+            "Скопировать недостающие стратегии для SYNC \"Manual A\"?\nBGF-SUB1: Hook Hook A, Manual Manual A"
         );
     }
 
@@ -1013,7 +987,7 @@ mod tests {
         let majorities = strict_majority_fields(1, &rows);
 
         assert_eq!(majorities["BuyPrice"].value, "1.8");
-        assert_eq!(majorities["BuyPrice"].label, "Entry depth");
+        assert_eq!(majorities["BuyPrice"].label, "Глубина выставления");
         assert_eq!(majorities["OrderUsd"].value, "500");
         assert_eq!(majorities["OrderUsd"].count, 2);
         assert_eq!(majorities["OrderUsd"].total, 3);

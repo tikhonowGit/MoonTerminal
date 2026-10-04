@@ -11,6 +11,7 @@ use moon_ui::{
 use rust_i18n::t;
 
 use moon_chart::paint::now_unix_ms;
+use moon_core::session::CoreId;
 
 use super::render_input;
 use super::{ChartPanel, chart_bootstrap_present_rate_hz};
@@ -80,9 +81,10 @@ impl ChartPanel {
         };
         if missing_plan.is_none() && param_plan.is_none() {
             window.push_notification(
-                MoonNotification::info("SYNC: исправляемых отличий не найдено".to_string()),
+                MoonNotification::info("SYNC: отличий не найдено".to_string()),
                 cx,
             );
+            cx.notify();
             return;
         }
         open_sync_manual_diagnostics_dialog(
@@ -165,10 +167,14 @@ fn open_sync_manual_repair_dialog(
                         .child(
                             MoonButton::new("chart-sync-repair-copy")
                                 .variant(MoonButtonVariant::Blue)
-                                .label("Скопировать")
+                                .label("Скопировать недостающие")
                                 .on_click(move |_, window, cx| {
-                                    let result = backend.update(cx, |backend, _| {
-                                        backend.apply_sync_manual_repair_plan(&plan)
+                                    let result = backend.update(cx, |backend, cx| {
+                                        let result = backend.apply_sync_manual_repair_plan(&plan);
+                                        if result.is_ok() {
+                                            cx.notify();
+                                        }
+                                        result
                                     });
                                     match result {
                                         Ok(()) => {
@@ -227,12 +233,16 @@ fn open_sync_manual_diagnostics_dialog(
                 move |plan| {
                     MoonButton::new("chart-sync-diagnostics-copy-missing")
                         .variant(MoonButtonVariant::Blue)
-                        .label("Скопировать недостающие")
+                        .label("Скопировать стратегии")
                         .on_click({
                             let backend = backend.clone();
                             move |_, window, cx| {
-                                let result = backend.update(cx, |backend, _| {
-                                    backend.apply_sync_manual_repair_plan(&plan)
+                                let result = backend.update(cx, |backend, cx| {
+                                    let result = backend.apply_sync_manual_repair_plan(&plan);
+                                    if result.is_ok() {
+                                        cx.notify();
+                                    }
+                                    result
                                 });
                                 match result {
                                     Ok(()) => {
@@ -262,12 +272,16 @@ fn open_sync_manual_diagnostics_dialog(
                 move |plan| {
                     MoonButton::new("chart-sync-diagnostics-align-params")
                         .variant(MoonButtonVariant::Blue)
-                        .label("Взять большинство")
+                        .label("Исправить отличия")
                         .on_click({
                             let backend = backend.clone();
                             move |_, window, cx| {
-                                let result = backend.update(cx, |backend, _| {
-                                    backend.apply_sync_manual_param_repair_plan(&plan)
+                                let result = backend.update(cx, |backend, cx| {
+                                    let result = backend.apply_sync_manual_param_repair_plan(&plan);
+                                    if result.is_ok() {
+                                        cx.notify();
+                                    }
+                                    result
                                 });
                                 match result {
                                     Ok(()) => {
@@ -363,6 +377,52 @@ fn sync_issue_variant(summary: &SyncManualIssueSummary) -> MoonButtonVariant {
     }
 }
 
+fn sync_issue_summary_from_plans(
+    missing_plan: Option<&SyncManualRepairPlan>,
+    param_plan: Option<&SyncManualParamRepairPlan>,
+) -> Option<SyncManualIssueSummary> {
+    let summary = SyncManualIssueSummary {
+        missing: missing_plan
+            .map(|plan| {
+                plan.cores
+                    .iter()
+                    .filter(|core| !core.missing.is_empty())
+                    .count()
+            })
+            .unwrap_or(0),
+        different: param_plan
+            .map(|plan| {
+                plan.cores
+                    .iter()
+                    .filter(|core| !core.changes.is_empty())
+                    .count()
+            })
+            .unwrap_or(0),
+    };
+    (!summary.is_empty()).then_some(summary)
+}
+
+fn sync_manual_status_has_repair(
+    status: &SyncManualStrategyStatus,
+    target: CoreId,
+    missing_plan: Option<&SyncManualRepairPlan>,
+    param_plan: Option<&SyncManualParamRepairPlan>,
+) -> bool {
+    match status {
+        SyncManualStrategyStatus::Ready => false,
+        SyncManualStrategyStatus::MissingStrategy { .. } => missing_plan.is_some_and(|plan| {
+            plan.cores
+                .iter()
+                .any(|core| core.core == target && !core.missing.is_empty())
+        }),
+        SyncManualStrategyStatus::DifferentParams { .. } => param_plan.is_some_and(|plan| {
+            plan.cores
+                .iter()
+                .any(|core| core.core == target && !core.changes.is_empty())
+        }),
+    }
+}
+
 impl Render for ChartPanel {
     /// Render the live chart surface and its explicitly unscoped in-chart figure settings.
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -447,25 +507,35 @@ impl Render for ChartPanel {
             // the observer already restamped before this render ran, instead of rebuilding it here
             // every frame.
             let report_axis = self.settings_sig.report_axis.clone();
-            let sync_manual_status = if self.sync_manual_orders_on {
+            let (sync_manual_status, sync_manual_issues) = if self.sync_manual_orders_on {
                 self.sync_manual_order_targets
                     .first()
-                    .and_then(|(origin, _)| {
-                        self.chart
-                            .active_target()
-                            .and_then(|(target, _)| b.sync_manual_strategy_status(*origin, target))
+                    .map_or((None, None), |(origin, _)| {
+                        let missing_plan =
+                            b.sync_manual_repair_plan(*origin, &self.sync_manual_order_targets);
+                        let param_plan = b.sync_manual_param_repair_plan(
+                            *origin,
+                            &self.sync_manual_order_targets,
+                        );
+                        let sync_manual_issues = sync_issue_summary_from_plans(
+                            missing_plan.as_ref(),
+                            param_plan.as_ref(),
+                        );
+                        let sync_manual_status =
+                            self.chart.active_target().and_then(|(target, _)| {
+                                let status = b.sync_manual_strategy_status(*origin, target)?;
+                                sync_manual_status_has_repair(
+                                    &status,
+                                    target,
+                                    missing_plan.as_ref(),
+                                    param_plan.as_ref(),
+                                )
+                                .then_some(status)
+                            });
+                        (sync_manual_status, sync_manual_issues)
                     })
             } else {
-                None
-            };
-            let sync_manual_issues = if self.sync_manual_orders_on {
-                self.sync_manual_order_targets
-                    .first()
-                    .and_then(|(origin, _)| {
-                        b.sync_manual_issue_summary(*origin, &self.sync_manual_order_targets)
-                    })
-            } else {
-                None
+                (None, None)
             };
             (
                 theme,
