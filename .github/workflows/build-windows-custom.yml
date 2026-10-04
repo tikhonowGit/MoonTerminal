@@ -1,0 +1,30 @@
+name: Build Windows Custom
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/windows-custom-exe-v053-sync-ui-fix
+
+jobs:
+  build-windows:
+    name: Build moonterminal.exe
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build debug exe
+        run: cargo build -p moon-ui-gpui --bin moonterminal --target x86_64-pc-windows-msvc
+
+      - name: Upload moonterminal.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: moonterminal-windows-custom-debug
+          path: target/x86_64-pc-windows-msvc/debug/moonterminal.exe
+          if-no-files-found: error
